@@ -170,13 +170,19 @@ fn setup_llvm() -> Result<()> {
         )?;
     }
 
-    // 2. Build LLVM from source
-    println!("[2/2] Building LLVM (this may take a while)...");
+    // 2. Build LLVM from source (skip if already built)
     let llvm_build_dir = base_dir.join("llvm-build");
     let llvm_install_dir = base_dir.join("llvm-install");
-    std::fs::create_dir_all(&llvm_build_dir)?;
-    std::fs::create_dir_all(&llvm_install_dir)?;
-    build_llvm(&llvm_src_dir, &llvm_build_dir, &llvm_install_dir)?;
+    let llvm_config = llvm_install_dir.join("bin/llvm-config");
+
+    if llvm_config.exists() {
+        println!("[2/2] LLVM already built (found {}), skipping", llvm_config.display());
+    } else {
+        println!("[2/2] Building LLVM (this may take a while)...");
+        std::fs::create_dir_all(&llvm_build_dir)?;
+        std::fs::create_dir_all(&llvm_install_dir)?;
+        build_llvm(&llvm_src_dir, &llvm_build_dir, &llvm_install_dir)?;
+    }
 
     println!("  LLVM installed to: {}", llvm_install_dir.display());
     Ok(())
@@ -204,6 +210,14 @@ fn build_llvm(src_dir: &Path, build_dir: &Path, install_prefix: &Path) -> Result
             "-DLLVM_TARGETS_TO_BUILD=BPF",
         ])
         .arg(install_arg);
+
+    // On Linux, explicitly use clang to avoid C++ ABI mismatches with GCC
+    if cfg!(target_os = "linux") {
+        cmake_configure
+            .arg("-DCMAKE_C_COMPILER=clang")
+            .arg("-DCMAKE_CXX_COMPILER=clang++");
+    }
+
     println!("Configuring LLVM with command {cmake_configure:?}");
     let status = cmake_configure.status().with_context(|| {
         format!("failed to configure LLVM build with command {cmake_configure:?}")

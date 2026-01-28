@@ -4,15 +4,13 @@ A template for creating Solana BPF programs using the upstream LLVM toolchain.
 
 ## Prerequisites
 
-Install the required tools:
+Set up the custom LLVM and SBPF linker:
 
 ```bash
-# Install sbpf-linker
-cargo install sbpf-linker
-
-# Install cargo-generate
-cargo install cargo-generate
+cargo run --package xtask -- setup
 ```
+
+This will clone and build the modified LLVM BPF backend and SBPF linker.
 
 ## Usage
 

@@ -28,6 +28,8 @@ enum Commands {
     BuildLinker,
     /// Clone and build LLVM with modified BPF backend
     BuildLlvm,
+    /// Incremental rebuild + reinstall LLVM (clears install dir, keeps build cache)
+    RebuildLlvm,
     /// Build the example project with the custom toolchain
     Build,
 }
@@ -53,6 +55,9 @@ fn main() -> Result<()> {
         }
         Commands::BuildLlvm => {
             setup_llvm()?;
+        }
+        Commands::RebuildLlvm => {
+            rebuild_llvm()?;
         }
         Commands::Build => {
             build_project(&project_root)?;
@@ -235,42 +240,71 @@ fn setup_llvm() -> Result<()> {
     Ok(())
 }
 
-fn build_llvm(src_dir: &Path, build_dir: &Path, install_prefix: &Path) -> Result<()> {
-    let mut install_arg = OsString::from("-DCMAKE_INSTALL_PREFIX=");
-    install_arg.push(install_prefix.as_os_str());
-    let mut cmake_configure = Command::new("cmake");
-    let cmake_configure = cmake_configure
-        .arg("-S")
-        .arg(src_dir.join("llvm"))
-        .arg("-B")
-        .arg(build_dir)
-        .args([
-            "-G",
-            "Ninja",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DLLVM_BUILD_LLVM_DYLIB=ON",
-            "-DLLVM_ENABLE_ASSERTIONS=ON",
-            "-DLLVM_ENABLE_PROJECTS=",
-            "-DLLVM_ENABLE_RUNTIMES=",
-            "-DLLVM_INSTALL_UTILS=ON",
-            "-DLLVM_LINK_LLVM_DYLIB=ON",
-            "-DLLVM_TARGETS_TO_BUILD=BPF",
-        ])
-        .arg(install_arg);
+fn rebuild_llvm() -> Result<()> {
+    let base_dir = cache_dir();
+    let llvm_src_dir = base_dir.join("llvm-project");
+    let llvm_build_dir = base_dir.join("llvm-build");
+    let llvm_install_dir = base_dir.join("llvm-install");
 
-    // On Linux, explicitly use clang to avoid C++ ABI mismatches with GCC
-    if cfg!(target_os = "linux") {
-        cmake_configure
-            .arg("-DCMAKE_C_COMPILER=clang")
-            .arg("-DCMAKE_CXX_COMPILER=clang++");
+    if !llvm_src_dir.exists() {
+        bail!("llvm-project not found at {}. Run `setup` or `build-llvm` first.", llvm_src_dir.display());
     }
 
-    println!("Configuring LLVM with command {cmake_configure:?}");
-    let status = cmake_configure.status().with_context(|| {
-        format!("failed to configure LLVM build with command {cmake_configure:?}")
-    })?;
-    if !status.success() {
-        anyhow::bail!("failed to configure LLVM build with command {cmake_configure:?}: {status}");
+    // Remove install dir for a clean reinstall
+    if llvm_install_dir.exists() {
+        println!("Removing old llvm-install...");
+        fs::remove_dir_all(&llvm_install_dir)?;
+    }
+    fs::create_dir_all(&llvm_install_dir)?;
+
+    println!("Rebuilding LLVM (incremental)...");
+    build_llvm(&llvm_src_dir, &llvm_build_dir, &llvm_install_dir)?;
+    println!("  LLVM installed to: {}", llvm_install_dir.display());
+    Ok(())
+}
+
+fn build_llvm(src_dir: &Path, build_dir: &Path, install_prefix: &Path) -> Result<()> {
+    // Skip cmake configure if already configured
+    let cmake_cache = build_dir.join("CMakeCache.txt");
+    if cmake_cache.exists() {
+        println!("  CMake already configured (found CMakeCache.txt), skipping configure");
+    } else {
+        let mut install_arg = OsString::from("-DCMAKE_INSTALL_PREFIX=");
+        install_arg.push(install_prefix.as_os_str());
+        let mut cmake_configure = Command::new("cmake");
+        let cmake_configure = cmake_configure
+            .arg("-S")
+            .arg(src_dir.join("llvm"))
+            .arg("-B")
+            .arg(build_dir)
+            .args([
+                "-G",
+                "Ninja",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DLLVM_BUILD_LLVM_DYLIB=ON",
+                "-DLLVM_ENABLE_ASSERTIONS=ON",
+                "-DLLVM_ENABLE_PROJECTS=",
+                "-DLLVM_ENABLE_RUNTIMES=",
+                "-DLLVM_INSTALL_UTILS=ON",
+                "-DLLVM_LINK_LLVM_DYLIB=ON",
+                "-DLLVM_TARGETS_TO_BUILD=BPF",
+            ])
+            .arg(install_arg);
+
+        // On Linux, explicitly use clang to avoid C++ ABI mismatches with GCC
+        if cfg!(target_os = "linux") {
+            cmake_configure
+                .arg("-DCMAKE_C_COMPILER=clang")
+                .arg("-DCMAKE_CXX_COMPILER=clang++");
+        }
+
+        println!("Configuring LLVM with command {cmake_configure:?}");
+        let status = cmake_configure.status().with_context(|| {
+            format!("failed to configure LLVM build with command {cmake_configure:?}")
+        })?;
+        if !status.success() {
+            anyhow::bail!("failed to configure LLVM build with command {cmake_configure:?}: {status}");
+        }
     }
 
     let mut cmake_build = Command::new("cmake");
@@ -288,9 +322,9 @@ fn build_llvm(src_dir: &Path, build_dir: &Path, install_prefix: &Path) -> Result
     println!("Building LLVM with command {cmake_build:?}");
     let status = cmake_build
         .status()
-        .with_context(|| format!("failed to build LLVM with command {cmake_configure:?}"))?;
+        .with_context(|| format!("failed to build LLVM with command {cmake_build:?}"))?;
     if !status.success() {
-        anyhow::bail!("failed to build LLVM with command {cmake_configure:?}: {status}");
+        anyhow::bail!("failed to build LLVM with command {cmake_build:?}: {status}");
     }
 
     // Move targets over the symlinks that point to them.
